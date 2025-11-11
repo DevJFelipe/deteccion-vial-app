@@ -1,0 +1,65 @@
+name: deteccion_vial_app
+description: Sistema de detección y mapeo de huecos y grietas viales mediante Deep Learning
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # State Management - BLoC Pattern
+  flutter_bloc: ^9.1.1
+  equatable: ^2.0.5
+  
+  # Dependency Injection
+  get_it: ^9.0.5
+  injectable: ^2.3.2
+  
+  # Camera & Computer Vision
+  camera: ^0.11.2+1
+  tflite_flutter: ^0.12.1
+  image: ^4.1.3
+  
+  # Geolocation Services
+  geolocator: ^14.0.2
+  permission_handler: ^12.0.1
+  
+  # Map Visualization
+  google_maps_flutter: ^2.5.0
+  
+  # Local Storage
+  sqflite: ^2.3.0
+  path_provider: ^2.1.1
+  path: ^1.8.3
+  
+  # Utilities
+  intl: ^0.20.2
+  uuid: ^4.2.1
+  
+  # UI Components
+  cupertino_icons: ^1.0.6
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  
+  # Testing Infrastructure
+  mockito: ^5.4.4
+  bloc_test: ^10.0.0
+  
+  # Code Generation
+  injectable_generator: ^2.4.1
+  build_runner: ^2.4.7
+  
+  # Code Quality
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/models/
+    - assets/images/
