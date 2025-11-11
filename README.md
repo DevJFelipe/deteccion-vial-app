@@ -4,7 +4,7 @@ Sistema de detección en tiempo real de huecos y grietas en infraestructura vial
 
 ## 📋 Descripción
 
-Proyecto de investigación PhD desarrollado en la Universidad Surcolombiana para la detección automática y georreferenciación de anomalías viales mediante visión artificial en dispositivos móviles.
+Proyecto de investigación desarrollado en la Universidad Surcolombiana para la detección automática y georreferenciación de anomalías viales mediante visión artificial en dispositivos móviles.
 
 ## 🚀 Características
 
