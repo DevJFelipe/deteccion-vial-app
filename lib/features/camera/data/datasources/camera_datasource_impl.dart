@@ -215,5 +215,13 @@ class CameraDataSourceImpl implements CameraDataSource {
       );
     }
   }
+
+  @override
+  camera_package.CameraController? get controller {
+    if (_controller == null || !_controller!.value.isInitialized) {
+      return null;
+    }
+    return _controller;
+  }
 }
 
