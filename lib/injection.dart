@@ -16,6 +16,9 @@ import 'features/camera/data/datasources/camera_datasource_impl.dart';
 import 'features/camera/domain/repositories/camera_repository.dart';
 import 'features/camera/data/repositories/camera_repository_impl.dart';
 
+// Feature Camera - Presentation Layer
+import 'features/camera/presentation/bloc/camera_bloc.dart';
+
 /// Instancia global de GetIt para inyección de dependencias
 final getIt = GetIt.instance;
 
@@ -56,6 +59,20 @@ void configureDependencies() {
   getIt.registerLazySingleton<CameraRepository>(
     () => CameraRepositoryImpl(
       getIt<CameraDataSource>(),
+    ),
+  );
+
+  // ============================================
+  // Feature Camera - Presentation Layer
+  // ============================================
+
+  // Registrar CameraBloc como factory
+  // Se crea una nueva instancia cada vez que se solicita
+  // Esto permite que cada pantalla tenga su propio BLoC
+  getIt.registerFactory<CameraBloc>(
+    () => CameraBloc(
+      repository: getIt<CameraRepository>(),
+      dataSource: getIt<CameraDataSource>(),
     ),
   );
 }
