@@ -138,6 +138,7 @@ class _CameraScreenState extends State<CameraScreen> {
   /// Construye el estado de streaming
   Widget _buildStreamingState(CameraStreaming state) {
     return CameraPreviewWidget(
+      controller: state.controller,
       frameStream: state.frameStream,
     );
   }

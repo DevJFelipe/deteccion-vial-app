@@ -100,11 +100,23 @@ class CameraBloc extends Bloc<CameraEvent, CameraState> {
       // Inicializar la cámara
       await repository.initializeCamera();
 
-      // Obtener el stream de frames
+      // Obtener el stream de frames para procesamiento ML
       final frameStream = repository.getFrameStream();
 
+      // Obtener el controller para preview nativo optimizado
+      final controller = dataSource.controller;
+      if (controller == null || !controller.value.isInitialized) {
+        emit(CameraError(
+          errorMessage: 'El controlador de cámara no está disponible',
+        ));
+        return;
+      }
+
       // Cambiar a estado de streaming
-      emit(CameraStreaming(frameStream: frameStream));
+      emit(CameraStreaming(
+        frameStream: frameStream,
+        controller: controller,
+      ));
     } on CameraFailure catch (e) {
       // Convertir CameraFailure a mensaje de error amigable
       final errorMessage = _getErrorMessage(e);

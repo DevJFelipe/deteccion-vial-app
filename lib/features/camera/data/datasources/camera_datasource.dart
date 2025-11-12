@@ -120,5 +120,25 @@ abstract class CameraDataSource {
   /// }
   /// ```
   bool get isInitialized;
+
+  /// Obtiene el controlador de cámara para preview nativo
+  /// 
+  /// Retorna el [CameraController] inicializado para usar con
+  /// el widget [CameraPreview] nativo del plugin camera.
+  /// Este método permite acceso directo al controller para
+  /// visualización optimizada sin conversión de frames.
+  /// 
+  /// **Uso**: Solo para visualización con CameraPreview nativo.
+  /// El stream de frames se usa para procesamiento ML.
+  /// 
+  /// Lanza excepciones si:
+  /// - La cámara no está inicializada
+  /// 
+  /// Ejemplo:
+  /// ```dart
+  /// final controller = dataSource.controller;
+  /// return CameraPreview(controller);
+  /// ```
+  camera_package.CameraController? get controller;
 }
 

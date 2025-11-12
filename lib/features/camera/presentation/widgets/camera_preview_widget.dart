@@ -1,33 +1,42 @@
 /// Widget para mostrar preview de cámara en tiempo real
 /// 
-/// Consume el stream de frames y los muestra visualmente,
-/// incluyendo overlay con información del frame actual.
+/// Usa el widget nativo CameraPreview del plugin camera para
+/// visualización optimizada. El stream de frames se mantiene
+/// solo para procesamiento ML y estadísticas, no para visualización.
 library;
 
-import 'dart:typed_data';
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:image/image.dart' as img;
+import 'package:camera/camera.dart' as camera_package;
 import '../../domain/entities/camera_frame.dart';
 import 'package:intl/intl.dart';
 
 /// Widget que muestra el preview de la cámara en tiempo real
 /// 
-/// Este widget consume el stream de frames y los convierte
-/// a imágenes visuales. Muestra cada frame con un overlay
-/// que incluye información como contador de frames, timestamp
-/// y resolución.
+/// Este widget usa el widget nativo [CameraPreview] para visualización
+/// optimizada sin conversión de frames. El stream de frames se usa
+/// solo para contabilizar y mostrar información, no para renderizar.
 class CameraPreviewWidget extends StatefulWidget {
-  /// Stream de frames de la cámara
+  /// Controlador de cámara para preview nativo
   /// 
-  /// Este stream emite [CameraFrame] a medida que se capturan.
-  final Stream<CameraFrame> frameStream;
+  /// Se usa con el widget [CameraPreview] nativo para visualización
+  /// optimizada sin conversión de frames en el hilo principal.
+  final camera_package.CameraController controller;
+
+  /// Stream de frames de la cámara para estadísticas
+  /// 
+  /// Este stream se usa para contabilizar frames y calcular FPS,
+  /// NO para visualización (que usa CameraPreview nativo).
+  final Stream<CameraFrame>? frameStream;
 
   /// Constructor del CameraPreviewWidget
   /// 
-  /// [frameStream] - Stream de frames para mostrar
+  /// [controller] - Controlador de cámara para preview nativo (requerido)
+  /// [frameStream] - Stream de frames para estadísticas (opcional)
   const CameraPreviewWidget({
     super.key,
-    required this.frameStream,
+    required this.controller,
+    this.frameStream,
   });
 
   @override
@@ -38,98 +47,71 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
   /// Contador de frames recibidos
   int _frameCount = 0;
 
-  /// Frame actual para mostrar
+  /// Frame actual para mostrar información
   CameraFrame? _currentFrame;
 
-  /// Error del stream si ocurre
-  String? _streamError;
+  /// Suscripción al stream de frames para estadísticas
+  StreamSubscription<CameraFrame>? _frameSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    // Escuchar stream en background solo para estadísticas
+    if (widget.frameStream != null) {
+      _frameSubscription = widget.frameStream!.listen(
+        (frame) {
+          if (mounted) {
+            setState(() {
+              _currentFrame = frame;
+              _frameCount++;
+            });
+          }
+        },
+        onError: (error) {
+          // Ignorar errores del stream, no afectan el preview
+        },
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    // Cancelar suscripción al stream
+    _frameSubscription?.cancel();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          // StreamBuilder para consumir frames
-          StreamBuilder<CameraFrame>(
-            stream: widget.frameStream,
-            builder: (context, snapshot) {
-              // Manejar errores del stream
-              if (snapshot.hasError) {
-                _streamError = snapshot.error.toString();
-                return _buildErrorWidget();
-              }
-
-              // Mostrar indicador de carga mientras no hay datos
-              if (!snapshot.hasData) {
-                return _buildLoadingWidget();
-              }
-
-              // Actualizar frame actual y contador
-              final frame = snapshot.data!;
-              _currentFrame = frame;
-              _frameCount++;
-
-              // Construir widget de imagen
-              return _buildImageWidget(frame);
-            },
-          ),
-          // Overlay de información
-          if (_currentFrame != null) _buildInfoOverlay(),
-        ],
+      child: SizedBox.expand(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            // Preview nativo optimizado - no requiere conversión de frames
+            _buildCameraPreview(),
+            // Overlay de información
+            if (_currentFrame != null) _buildInfoOverlay(),
+          ],
+        ),
       ),
     );
   }
 
-  /// Construye el widget de imagen desde el frame
+  /// Construye el preview nativo de la cámara
   /// 
-  /// Convierte el Uint8List grayscale a una imagen RGB
-  /// y la muestra usando Image.memory().
-  Widget _buildImageWidget(CameraFrame frame) {
-    try {
-      // Convertir grayscale a RGB
-      final rgbImage = _convertGrayscaleToRgb(frame);
-
-      // Codificar a PNG para Image.memory
-      final pngBytes = Uint8List.fromList(
-        img.encodePng(rgbImage),
-      );
-
-      // Mostrar imagen
-      return Image.memory(
-        pngBytes,
-        fit: BoxFit.cover,
-        gaplessPlayback: true, // Evitar parpadeo entre frames
-      );
-    } catch (e) {
-      // Si hay error en la conversión, mostrar error
-      return _buildErrorWidget(
-        errorMessage: 'Error al procesar frame: ${e.toString()}',
+  /// Usa CameraPreview del plugin camera que renderiza nativamente
+  /// sin conversión de frames, logrando 30+ FPS.
+  Widget _buildCameraPreview() {
+    // Verificar que el controller esté inicializado
+    if (!widget.controller.value.isInitialized) {
+      return const Center(
+        child: CircularProgressIndicator(),
       );
     }
-  }
 
-  /// Convierte datos grayscale a imagen RGB
-  /// 
-  /// Toma el Uint8List grayscale (plano Y de YUV420) y lo convierte
-  /// a una imagen RGB usando el paquete `image`.
-  img.Image _convertGrayscaleToRgb(CameraFrame frame) {
-    // Crear imagen RGB directamente desde los bytes grayscale
-    final rgbImage = img.Image(width: frame.width, height: frame.height);
-    
-    // Los bytes grayscale están en frame.image
-    // Cada byte representa un píxel en escala de grises
-    for (var i = 0; i < frame.image.length && i < frame.width * frame.height; i++) {
-      final grayValue = frame.image[i];
-      final x = i % frame.width;
-      final y = i ~/ frame.width;
-      
-      // Crear color RGB con el mismo valor en los 3 canales (escala de grises)
-      // Usar setPixelRgba que acepta valores individuales de R, G, B, A
-      rgbImage.setPixelRgba(x, y, grayValue, grayValue, grayValue, 255);
-    }
-
-    return rgbImage;
+    // Usar CameraPreview nativo para renderizado optimizado
+    return camera_package.CameraPreview(widget.controller);
   }
 
   /// Construye el overlay de información
@@ -181,34 +163,4 @@ class _CameraPreviewWidgetState extends State<CameraPreviewWidget> {
       ),
     );
   }
-
-  /// Construye widget de carga
-  Widget _buildLoadingWidget() {
-    return const Center(
-      child: CircularProgressIndicator(),
-    );
-  }
-
-  /// Construye widget de error
-  Widget _buildErrorWidget({String? errorMessage}) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.error_outline,
-            size: 48,
-            color: Colors.red,
-          ),
-          const SizedBox(height: 16),
-          Text(
-            errorMessage ?? _streamError ?? 'Error en el stream de frames',
-            style: Theme.of(context).textTheme.bodyLarge,
-            textAlign: TextAlign.center,
-          ),
-        ],
-      ),
-    );
-  }
 }
-

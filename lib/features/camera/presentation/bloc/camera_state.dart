@@ -52,25 +52,35 @@ class CameraLoading extends CameraState {
 /// Estado de streaming activo
 /// 
 /// Este estado se emite cuando la cámara está inicializada y
-/// emitiendo frames. Contiene el stream de frames para que
-/// los widgets puedan consumirlo.
+/// emitiendo frames. Contiene el controller para preview nativo
+/// y el stream de frames para procesamiento ML.
 class CameraStreaming extends CameraState {
-  /// Stream de frames de la cámara
+  /// Stream de frames de la cámara para procesamiento ML
   /// 
   /// Este stream emite [CameraFrame] a medida que se capturan
-  /// frames del video. Los widgets pueden suscribirse a este
-  /// stream para mostrar el preview en tiempo real.
+  /// frames del video. Se usa para inferencia ML y estadísticas,
+  /// NO para visualización (que usa CameraPreview nativo).
   final Stream<CameraFrame> frameStream;
+
+  /// Controlador de cámara para preview nativo
+  /// 
+  /// Se usa con el widget [CameraPreview] nativo para visualización
+  /// optimizada sin conversión de frames en el hilo principal.
+  /// Tipo: CameraController del plugin camera (usar dynamic para evitar
+  /// dependencia circular entre capas).
+  final dynamic controller;
 
   /// Constructor de CameraStreaming
   /// 
-  /// [frameStream] - Stream de frames de la cámara
+  /// [frameStream] - Stream de frames para procesamiento ML
+  /// [controller] - Controlador de cámara para preview nativo
   const CameraStreaming({
     required this.frameStream,
+    required this.controller,
   });
 
   @override
-  List<Object?> get props => [frameStream];
+  List<Object?> get props => [frameStream, controller];
 
   @override
   String toString() => 'CameraStreaming';
