@@ -19,6 +19,14 @@ import 'features/camera/data/repositories/camera_repository_impl.dart';
 // Feature Camera - Presentation Layer
 import 'features/camera/presentation/bloc/camera_bloc.dart';
 
+// Feature Detection - Data Layer
+import 'features/detection/data/datasources/tflite_datasource.dart';
+import 'features/detection/data/datasources/tflite_datasource_impl.dart';
+
+// Feature Detection - Domain Layer
+import 'features/detection/domain/repositories/detection_repository.dart';
+import 'features/detection/data/repositories/detection_repository_impl.dart';
+
 /// Instancia global de GetIt para inyección de dependencias
 final getIt = GetIt.instance;
 
@@ -73,6 +81,29 @@ void configureDependencies() {
     () => CameraBloc(
       repository: getIt<CameraRepository>(),
       dataSource: getIt<CameraDataSource>(),
+    ),
+  );
+
+  // ============================================
+  // Feature Detection - Data Layer
+  // ============================================
+
+  // Registrar TfliteDatasource como lazy singleton
+  // La implementación concreta es TfliteDatasourceImpl
+  getIt.registerLazySingleton<TfliteDatasource>(
+    () => TfliteDatasourceImpl(),
+  );
+
+  // ============================================
+  // Feature Detection - Domain Layer
+  // ============================================
+
+  // Registrar DetectionRepository como lazy singleton
+  // La implementación concreta es DetectionRepositoryImpl
+  // Inyecta TfliteDatasource como dependencia
+  getIt.registerLazySingleton<DetectionRepository>(
+    () => DetectionRepositoryImpl(
+      getIt<TfliteDatasource>(),
     ),
   );
 }
