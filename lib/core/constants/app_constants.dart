@@ -5,9 +5,9 @@
 library;
 
 /// Ruta del modelo TensorFlow Lite cuantizado
-const String modelPath = 'assets/models/yolov8n_int8.tflite';
+const String modelPath = 'assets/models/yolov8s_int8.tflite';
 
-/// Tamaño de entrada del modelo YOLOv8n (640x640 píxeles)
+/// Tamaño de entrada del modelo YOLOv8s (640x640 píxeles)
 const int inputSize = 640;
 
 /// Umbral de confianza mínimo para considerar una detección válida
