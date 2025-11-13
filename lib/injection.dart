@@ -26,6 +26,11 @@ import 'features/detection/data/datasources/tflite_datasource_impl.dart';
 // Feature Detection - Domain Layer
 import 'features/detection/domain/repositories/detection_repository.dart';
 import 'features/detection/data/repositories/detection_repository_impl.dart';
+import 'features/detection/domain/usecases/load_detection_model_usecase.dart';
+import 'features/detection/domain/usecases/run_inference_usecase.dart';
+
+// Feature Detection - Presentation Layer
+import 'features/detection/presentation/bloc/detection_bloc.dart';
 
 /// Instancia global de GetIt para inyección de dependencias
 final getIt = GetIt.instance;
@@ -104,6 +109,37 @@ void configureDependencies() {
   getIt.registerLazySingleton<DetectionRepository>(
     () => DetectionRepositoryImpl(
       getIt<TfliteDatasource>(),
+    ),
+  );
+
+  // Registrar LoadDetectionModelUseCase como factory
+  // Se crea una nueva instancia cada vez que se solicita
+  getIt.registerFactory<LoadDetectionModelUseCase>(
+    () => LoadDetectionModelUseCase(
+      getIt<DetectionRepository>(),
+    ),
+  );
+
+  // Registrar RunInferenceUseCase como factory
+  // Se crea una nueva instancia cada vez que se solicita
+  getIt.registerFactory<RunInferenceUseCase>(
+    () => RunInferenceUseCase(
+      getIt<DetectionRepository>(),
+    ),
+  );
+
+  // ============================================
+  // Feature Detection - Presentation Layer
+  // ============================================
+
+  // Registrar DetectionBloc como factory
+  // Se crea una nueva instancia cada vez que se solicita
+  // Esto permite que cada pantalla tenga su propio BLoC
+  getIt.registerFactory<DetectionBloc>(
+    () => DetectionBloc(
+      loadModelUseCase: getIt<LoadDetectionModelUseCase>(),
+      runInferenceUseCase: getIt<RunInferenceUseCase>(),
+      cameraRepository: getIt<CameraRepository>(),
     ),
   );
 }

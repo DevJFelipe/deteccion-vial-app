@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 import '../../../camera/presentation/screens/camera_screen.dart';
+import '../../../detection/presentation/screens/detection_screen.dart';
 
 /// Pantalla de inicio
 /// 
@@ -75,8 +76,28 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 32),
-            // Botón principal para iniciar cámara
+            // Botón principal para iniciar detección
             FilledButton.icon(
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (context) => const DetectionScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.auto_awesome),
+              label: const Text('Iniciar Detección'),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 32,
+                  vertical: 16,
+                ),
+                minimumSize: const Size(double.infinity, 56),
+              ),
+            ),
+            const SizedBox(height: 16),
+            // Botón para preview de cámara
+            OutlinedButton.icon(
               onPressed: () {
                 Navigator.of(context).push(
                   MaterialPageRoute(
@@ -85,8 +106,8 @@ class HomeScreen extends StatelessWidget {
                 );
               },
               icon: const Icon(Icons.camera_alt),
-              label: const Text('Abrir Cámara'),
-              style: FilledButton.styleFrom(
+              label: const Text('Preview de Cámara'),
+              style: OutlinedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 32,
                   vertical: 16,
