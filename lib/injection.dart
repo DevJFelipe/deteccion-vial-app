@@ -27,6 +27,9 @@ import 'features/detection/data/datasources/tflite_datasource_impl.dart';
 import 'features/detection/domain/repositories/detection_repository.dart';
 import 'features/detection/data/repositories/detection_repository_impl.dart';
 
+// Feature Detection - Presentation Layer
+import 'features/detection/presentation/bloc/detection_bloc.dart';
+
 /// Instancia global de GetIt para inyección de dependencias
 final getIt = GetIt.instance;
 
@@ -90,6 +93,8 @@ void configureDependencies() {
 
   // Registrar TfliteDatasource como lazy singleton
   // La implementación concreta es TfliteDatasourceImpl
+  // IMPORTANTE: El modelo se carga cuando se llama loadModel(),
+  // no al instanciar el datasource
   getIt.registerLazySingleton<TfliteDatasource>(
     () => TfliteDatasourceImpl(),
   );
@@ -106,5 +111,18 @@ void configureDependencies() {
       getIt<TfliteDatasource>(),
     ),
   );
-}
 
+  // ============================================
+  // Feature Detection - Presentation Layer
+  // ============================================
+
+  // Registrar DetectionBloc como factory
+  // Se crea una nueva instancia cada vez que se solicita
+  // Esto permite que cada pantalla tenga su propio BLoC de detección
+  // El modelo se carga cuando se dispara LoadModelEvent
+  getIt.registerFactory<DetectionBloc>(
+    () => DetectionBloc(
+      repository: getIt<DetectionRepository>(),
+    ),
+  );
+}

@@ -1,9 +1,10 @@
-/// Pantalla principal para mostrar preview de cámara
+/// Pantalla principal para mostrar preview de cámara con detección de IA
 /// 
-/// Gestiona el ciclo de vida completo de la cámara y muestra
-/// el preview en tiempo real con información de FPS y estado.
+/// Gestiona el ciclo de vida completo de la cámara y el modelo de detección,
+/// mostrando el preview en tiempo real con bounding boxes de detecciones.
 library;
 
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../bloc/camera_bloc.dart';
@@ -13,15 +14,20 @@ import '../widgets/camera_preview_widget.dart';
 import '../widgets/fps_indicator_widget.dart';
 import '../widgets/error_state_widget.dart';
 import '../widgets/permission_dialog_widget.dart';
+import '../../../detection/presentation/bloc/detection_bloc.dart';
+import '../../../detection/presentation/bloc/detection_event.dart';
+import '../../../detection/presentation/bloc/detection_state.dart';
+import '../../../detection/presentation/widgets/detection_overlay_widget.dart';
+import '../../domain/entities/camera_frame.dart';
 import '../../../../injection.dart';
 
-/// Pantalla principal para mostrar preview de cámara
+/// Pantalla principal para mostrar preview de cámara con detección de IA
 /// 
-/// Esta pantalla gestiona el ciclo de vida completo de la cámara:
-/// - Inicializa la cámara al montarse
-/// - Muestra preview en tiempo real cuando está streaming
-/// - Maneja errores y permisos
-/// - Libera recursos al desmontarse
+/// Esta pantalla gestiona:
+/// - Ciclo de vida de la cámara (inicialización, streaming, liberación)
+/// - Carga y ejecución del modelo de detección
+/// - Visualización de bounding boxes sobre el preview
+/// - Manejo de errores y permisos
 class CameraScreen extends StatefulWidget {
   /// Constructor del CameraScreen
   const CameraScreen({super.key});
@@ -31,34 +37,70 @@ class CameraScreen extends StatefulWidget {
 }
 
 class _CameraScreenState extends State<CameraScreen> {
-  /// BLoC de cámara
-  /// 
-  /// Se obtiene desde GetIt y se proporciona a los widgets hijos
-  /// mediante BlocProvider.
+  /// BLoC de cámara para gestionar el hardware
   late final CameraBloc _cameraBloc;
+  
+  /// BLoC de detección para gestionar el modelo de IA
+  late final DetectionBloc _detectionBloc;
+  
+  /// Suscripción al stream de frames para procesamiento
+  StreamSubscription<CameraFrame>? _frameSubscription;
 
   @override
   void initState() {
     super.initState();
-    // Obtener BLoC desde GetIt
+    // Obtener BLoCs desde GetIt
     _cameraBloc = getIt<CameraBloc>();
+    _detectionBloc = getIt<DetectionBloc>();
+    
+    // Cargar el modelo de detección primero
+    _detectionBloc.add(const LoadModelEvent());
+    
     // Inicializar cámara al montar la pantalla
     _cameraBloc.add(const InitializeCameraEvent());
   }
 
   @override
   void dispose() {
-    // Liberar recursos de cámara al desmontar
+    // Cancelar suscripción al stream de frames
+    _frameSubscription?.cancel();
+    
+    // Liberar recursos de detección
+    _detectionBloc.add(const DisposeModelEvent());
+    _detectionBloc.close();
+    
+    // Liberar recursos de cámara
     _cameraBloc.add(const DisposeCameraEvent());
-    // Cerrar el BLoC
     _cameraBloc.close();
+    
     super.dispose();
+  }
+
+  /// Inicia el procesamiento de frames para detección
+  void _startFrameProcessing(Stream<CameraFrame> frameStream) {
+    // Cancelar suscripción anterior si existe
+    _frameSubscription?.cancel();
+    
+    // Suscribirse al stream de frames
+    _frameSubscription = frameStream.listen(
+      (frame) {
+        // Enviar frame al BLoC de detección
+        // El throttling se maneja internamente en el BLoC
+        _detectionBloc.add(ProcessFrameEvent(frame: frame));
+      },
+      onError: (error) {
+        // Ignorar errores del stream
+      },
+    );
   }
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider<CameraBloc>.value(
-      value: _cameraBloc,
+    return MultiBlocProvider(
+      providers: [
+        BlocProvider<CameraBloc>.value(value: _cameraBloc),
+        BlocProvider<DetectionBloc>.value(value: _detectionBloc),
+      ],
       child: Scaffold(
         appBar: AppBar(
           title: const Text('Detección Vial - IA'),
@@ -68,9 +110,37 @@ class _CameraScreenState extends State<CameraScreen> {
               builder: (context, state) {
                 if (state is CameraStreaming) {
                   return Padding(
-                    padding: const EdgeInsets.only(right: 16.0),
+                    padding: const EdgeInsets.only(right: 8.0),
                     child: FpsIndicatorWidget(
                       frameStream: state.frameStream,
+                    ),
+                  );
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+            // Indicador de detección
+            BlocBuilder<DetectionBloc, DetectionState>(
+              builder: (context, state) {
+                if (state is DetectionReady) {
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 16.0),
+                    child: DetectionStatsWidget(
+                      inferenceTimeMs: state.inferenceTimeMs,
+                      detectionCount: state.detections.length,
+                      isProcessing: state.isProcessing,
+                    ),
+                  );
+                } else if (state is DetectionModelLoading) {
+                  return const Padding(
+                    padding: EdgeInsets.only(right: 16.0),
+                    child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
                     ),
                   );
                 }
@@ -80,7 +150,13 @@ class _CameraScreenState extends State<CameraScreen> {
           ],
         ),
         body: SafeArea(
-          child: BlocBuilder<CameraBloc, CameraState>(
+          child: BlocConsumer<CameraBloc, CameraState>(
+            listener: (context, state) {
+              // Cuando la cámara empieza a transmitir, iniciar procesamiento
+              if (state is CameraStreaming) {
+                _startFrameProcessing(state.frameStream);
+              }
+            },
             builder: (context, state) {
               // Manejar diferentes estados
               if (state is CameraInitial || state is CameraLoading) {
@@ -123,23 +199,94 @@ class _CameraScreenState extends State<CameraScreen> {
 
   /// Construye el estado de carga
   Widget _buildLoadingState() {
-    return const Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Inicializando cámara...'),
-        ],
-      ),
+    return BlocBuilder<DetectionBloc, DetectionState>(
+      builder: (context, detectionState) {
+        String message = 'Inicializando cámara...';
+        if (detectionState is DetectionModelLoading) {
+          message = 'Cargando modelo de IA...';
+        } else if (detectionState is DetectionError) {
+          message = 'Inicializando cámara...\n(${detectionState.message})';
+        }
+        
+        return Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(height: 16),
+              Text(
+                message,
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 
-  /// Construye el estado de streaming
+  /// Construye el estado de streaming con overlay de detecciones
   Widget _buildStreamingState(CameraStreaming state) {
-    return CameraPreviewWidget(
-      controller: state.controller,
-      frameStream: state.frameStream,
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        // Preview de cámara
+        CameraPreviewWidget(
+          controller: state.controller,
+          frameStream: state.frameStream,
+        ),
+        // Overlay de detecciones
+        BlocBuilder<DetectionBloc, DetectionState>(
+          builder: (context, detectionState) {
+            if (detectionState is DetectionReady && 
+                detectionState.detections.isNotEmpty) {
+              return DetectionOverlayWidget(
+                detections: detectionState.detections,
+              );
+            }
+            return const SizedBox.shrink();
+          },
+        ),
+        // Estado del modelo (si hay error)
+        BlocBuilder<DetectionBloc, DetectionState>(
+          builder: (context, detectionState) {
+            if (detectionState is DetectionError) {
+              return Positioned(
+                top: 8,
+                left: 8,
+                right: 8,
+                child: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.8),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.error_outline, color: Colors.white),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          detectionState.message,
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                        ),
+                      ),
+                      if (detectionState.canRetry)
+                        IconButton(
+                          icon: const Icon(Icons.refresh, color: Colors.white),
+                          onPressed: () {
+                            _detectionBloc.add(const LoadModelEvent());
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              );
+            }
+            return const SizedBox.shrink();
+          },
+        ),
+      ],
     );
   }
 
@@ -150,6 +297,7 @@ class _CameraScreenState extends State<CameraScreen> {
       onRetry: () {
         // Reintentar inicialización
         _cameraBloc.add(const InitializeCameraEvent());
+        _detectionBloc.add(const LoadModelEvent());
       },
       onBack: () {
         // Volver atrás
@@ -236,4 +384,3 @@ class _CameraScreenState extends State<CameraScreen> {
     );
   }
 }
-

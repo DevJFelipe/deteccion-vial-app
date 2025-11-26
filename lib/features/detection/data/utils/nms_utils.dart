@@ -5,7 +5,8 @@
 library;
 
 import '../../domain/entities/detection_result.dart';
-import '../models/detection_constants.dart' show nmsThreshold;
+import '../models/detection_constants.dart' 
+    show nmsThreshold, nmsPerClassThreshold, maxDetectionsPerFrame;
 
 /// Representa una detección con su índice original para NMS
 class _DetectionWithIndex {
@@ -141,3 +142,51 @@ List<DetectionResult> applyNMS(
   return kept;
 }
 
+/// Aplica NMS por clase para mejor filtrado
+/// 
+/// A diferencia de [applyNMS], esta función:
+/// 1. Agrupa detecciones por clase
+/// 2. Aplica NMS dentro de cada clase con umbral más estricto
+/// 3. Combina los resultados
+/// 4. Ordena por confianza y limita el número de detecciones
+/// 
+/// Esto es más efectivo porque evita que detecciones de diferentes
+/// clases se supriman entre sí incorrectamente.
+/// 
+/// [detections] - Lista de detecciones a filtrar
+/// [iouThreshold] - Umbral de IoU para NMS por clase (default más estricto: 0.3)
+/// [maxDetections] - Número máximo de detecciones a retornar
+/// 
+/// Retorna lista filtrada ordenada por confianza descendente.
+List<DetectionResult> applyNMSPerClass(
+  List<DetectionResult> detections, {
+  double iouThreshold = nmsPerClassThreshold,
+  int maxDetections = maxDetectionsPerFrame,
+}) {
+  if (detections.isEmpty) {
+    return detections;
+  }
+
+  // Agrupar detecciones por clase
+  final byClass = <String, List<DetectionResult>>{};
+  for (final detection in detections) {
+    byClass.putIfAbsent(detection.type, () => []).add(detection);
+  }
+
+  // Aplicar NMS a cada clase por separado
+  final result = <DetectionResult>[];
+  for (final classDetections in byClass.values) {
+    final filtered = applyNMS(classDetections, iouThreshold: iouThreshold);
+    result.addAll(filtered);
+  }
+
+  // Ordenar por confianza descendente
+  result.sort((a, b) => b.confidence.compareTo(a.confidence));
+
+  // Limitar número de detecciones
+  if (result.length > maxDetections) {
+    return result.sublist(0, maxDetections);
+  }
+
+  return result;
+}

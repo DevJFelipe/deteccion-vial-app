@@ -2,9 +2,13 @@
 /// 
 /// Extiende la entidad DetectionResult del domain layer y proporciona
 /// métodos para convertir la salida del modelo TFLite a entidades del dominio.
+/// 
+/// IMPORTANTE: Este modelo está configurado para un YOLOv8 fine-tuned con 2 clases.
 library;
 
+import 'dart:math' as math;
 import '../../domain/entities/detection_result.dart';
+import '../../domain/entities/bounding_box.dart';
 import 'bounding_box_model.dart';
 import 'detection_constants.dart'
     show
@@ -12,15 +16,20 @@ import 'detection_constants.dart'
         bboxYIndex,
         bboxWidthIndex,
         bboxHeightIndex,
-        objectnessIndex,
         classScoresStartIndex,
-        numCocoClasses,
-        modelOutputBatchSize,
+        numClasses,
         modelOutputValuesPerDetection,
         modelOutputNumDetections,
-        cocoClassToProjectClass,
+        modelInputSize,
+        classIndexToName,
         projectClasses,
-        confidenceThreshold;
+        confidenceThreshold,
+        minBboxArea,
+        maxBboxArea,
+        minBboxDimension,
+        maxBboxDimension,
+        minAspectRatio,
+        maxAspectRatio;
 
 /// Modelo de datos para DetectionResult
 /// 
@@ -29,14 +38,13 @@ import 'detection_constants.dart'
 /// entidades del dominio.
 /// 
 /// Este modelo se usa en la capa de datos para convertir resultados
-/// del modelo TFLite (tensor [1, 84, 8400]) a entidades [DetectionResult].
+/// del modelo TFLite (tensor [1, 6, 8400]) a entidades [DetectionResult].
+/// 
+/// Formato de salida YOLOv8 (2 clases):
+/// - Tensor shape: [1, 6, 8400]
+/// - Cada detección: [x_center, y_center, width, height, class0_score, class1_score]
 class DetectionResultModel extends DetectionResult {
   /// Constructor de DetectionResultModel
-  /// 
-  /// [type] - Tipo de detección ('hueco' o 'grieta')
-  /// [confidence] - Nivel de confianza (0.0 a 1.0)
-  /// [boundingBox] - Bounding box de la detección
-  /// [timestamp] - Timestamp de la detección
   const DetectionResultModel({
     required super.type,
     required super.confidence,
@@ -44,57 +52,68 @@ class DetectionResultModel extends DetectionResult {
     required super.timestamp,
   });
 
+  /// Desenvuelve un tensor anidado hasta llegar a la forma [6, 8400]
+  /// 
+  /// El tensor puede venir en diferentes niveles de anidamiento:
+  /// - [outputBuffer] donde outputBuffer = [1, 6, 8400]
+  /// - [[batch]] donde batch = [6, 8400]
+  /// 
+  /// Esta función desenvuelve hasta encontrar la estructura [6, 8400]
+  static List<dynamic> _unwrapTensor(List<dynamic> tensor) {
+    List<dynamic> current = tensor;
+    
+    // Desenvolver mientras el primer elemento sea una lista y haya solo un elemento
+    // o mientras la estructura no sea [6, 8400]
+    while (current.isNotEmpty) {
+      // Si el primer elemento no es lista, ya llegamos al nivel correcto
+      if (current[0] is! List) {
+        break;
+      }
+      
+      final firstList = current[0] as List;
+      
+      // Verificar si esta es la forma [6, 8400]
+      // La forma correcta es: current.length == 6 y firstList.length == 8400
+      if (current.length == modelOutputValuesPerDetection && 
+          firstList.length >= modelOutputNumDetections) {
+        // Esta es la forma correcta [6, 8400]
+        break;
+      }
+      
+      // Si solo hay un elemento, desenvolver
+      if (current.length == 1) {
+        current = firstList;
+        continue;
+      }
+      
+      // Si hay más elementos, verificar si es [8400, 6]
+      if (current.length >= modelOutputNumDetections &&
+          firstList.length == modelOutputValuesPerDetection) {
+        // Esta es la forma transpuesta [8400, 6], retornar como está
+        break;
+      }
+      
+      // Si no coincide con ningún formato esperado, intentar desenvolver
+      if (current.length < modelOutputValuesPerDetection) {
+        current = firstList;
+        continue;
+      }
+      
+      break;
+    }
+    
+    return current;
+  }
+
   /// Crea un DetectionResultModel desde la salida del modelo TFLite
-  /// 
-  /// [tfliteOutput] - Tensor de salida del modelo TFLite con forma [1, 84, 8400]
-  /// [detectionIndex] - Índice de la detección en el tensor (0-8399)
-  /// [timestamp] - Timestamp de cuando se realizó la detección
-  /// 
-  /// Procesa un tensor de salida del modelo YOLOv8s y extrae:
-  /// - Coordenadas del bounding box (x, y, width, height) normalizadas [0-1]
-  /// - Confianza de la detección (objectness * max(class_score))
-  /// - Clase detectada (argmax de class_scores)
-  /// 
-  /// La salida del modelo tiene la siguiente estructura:
-  /// [batch_size=1, num_values_per_detection=84, num_detections=8400]
-  /// 
-  /// Cada detección tiene 84 valores:
-  /// [x_center, y_center, width, height, objectness, class0_score, ..., class79_score]
-  /// 
-  /// Ejemplo:
-  /// ```dart
-  /// final model = DetectionResultModel.fromTfliteOutput(
-  ///   tfliteOutput: outputTensor,
-  ///   detectionIndex: 0,
-  ///   timestamp: DateTime.now(),
-  /// );
-  /// ```
   factory DetectionResultModel.fromTfliteOutput({
     required List<dynamic> tfliteOutput,
     required int detectionIndex,
     required DateTime timestamp,
   }) {
     try {
-      // El tensor de tflite_flutter puede venir en diferentes formatos:
-      // 1. [1, 84, 8400]: tfliteOutput[0] contiene [84, 8400]
-      // 2. [84, 8400]: tfliteOutput contiene directamente [84, 8400]
-      // 3. [8400, 84]: tfliteOutput contiene [8400, 84] (transpuesta)
-      
-      List<dynamic> batch;
-      
-      if (tfliteOutput.length == modelOutputBatchSize) {
-        // Forma [1, 84, 8400]: obtener el primer batch
-        batch = tfliteOutput[0] as List<dynamic>;
-      } else if (tfliteOutput.length == modelOutputValuesPerDetection ||
-                 tfliteOutput.length == modelOutputNumDetections) {
-        // Forma [84, 8400] o [8400, 84]: usar directamente
-        batch = tfliteOutput;
-      } else {
-        throw ArgumentError(
-          'Formato de tensor no reconocido. Longitud: ${tfliteOutput.length}, '
-          'se esperaba: 1, $modelOutputValuesPerDetection, o $modelOutputNumDetections',
-        );
-      }
+      // Desenvolver el tensor hasta llegar a [6, 8400]
+      final batch = _unwrapTensor(tfliteOutput);
 
       // Validar que el batch no esté vacío
       if (batch.isEmpty) {
@@ -102,7 +121,6 @@ class DetectionResultModel extends DetectionResult {
       }
 
       // Validar el índice de detección
-      // El rango válido depende del formato del tensor, pero validamos contra el máximo esperado
       if (detectionIndex < 0 || detectionIndex >= modelOutputNumDetections) {
         throw ArgumentError(
           'El índice de detección debe estar entre 0 y ${modelOutputNumDetections - 1}, '
@@ -111,129 +129,105 @@ class DetectionResultModel extends DetectionResult {
       }
 
       // Extraer valores del tensor
-      // El tensor de tflite_flutter puede venir en diferentes formatos:
-      // 1. [1, 84, 8400]: batch[0][value_index][detection_index]
-      // 2. [84, 8400]: batch[value_index][detection_index] (más común)
-      // 3. [8400, 84]: batch[detection_index][value_index] (transpuesta)
-      
       List<double> detectionValues;
       
-      // Verificar el primer elemento para determinar la estructura
       final firstElement = batch[0];
       
       if (firstElement is List) {
-        // El tensor tiene forma [84, 8400] o similar
         final firstList = firstElement;
         
-        if (firstList.length == modelOutputNumDetections) {
-          // Forma [84, 8400]: cada fila (value_index) contiene 8400 valores (una por detección)
+        if (firstList.length >= modelOutputNumDetections) {
+          // Forma [6, 8400]: cada fila (value_index) contiene 8400 valores
           // Acceder a batch[value_index][detection_index]
           detectionValues = List<double>.generate(
             modelOutputValuesPerDetection,
             (valueIndex) {
               if (valueIndex < batch.length) {
                 final valueList = batch[valueIndex];
-                if (valueList is List) {
-                  if (detectionIndex < valueList.length) {
-                    final value = valueList[detectionIndex];
-                    if (value is num) {
-                      return value.toDouble();
-                    } else if (value is double) {
-                      return value;
-                    } else if (value is int) {
-                      return value.toDouble();
-                    }
-                  }
+                if (valueList is List && detectionIndex < valueList.length) {
+                  return _toDouble(valueList[detectionIndex]);
                 }
               }
               return 0.0;
             },
           );
-        } else {
-          // Podría ser forma [8400, 84]: cada fila (detection_index) contiene 84 valores
-          // Intentar acceder a batch[detection_index][value_index]
-          if (detectionIndex < batch.length) {
-            final detectionRow = batch[detectionIndex];
-            if (detectionRow is List &&
-                detectionRow.length >= modelOutputValuesPerDetection) {
-              detectionValues = List<double>.generate(
-                modelOutputValuesPerDetection,
-                (valueIndex) {
-                  final value = detectionRow[valueIndex];
-                  if (value is num) {
-                    return value.toDouble();
-                  } else if (value is double) {
-                    return value;
-                  } else if (value is int) {
-                    return value.toDouble();
-                  }
-                  return 0.0;
-                },
-              );
-            } else {
-              throw ArgumentError(
-                'Formato de tensor no soportado. Se espera [1, 84, 8400], '
-                '[84, 8400] o [8400, 84], pero se encontró estructura diferente.',
-              );
-            }
-          } else {
-            throw ArgumentError(
-              'Índice de detección fuera de rango: $detectionIndex (máximo: ${batch.length - 1})',
+        } else if (batch.length >= modelOutputNumDetections) {
+          // Forma [8400, 6]: cada fila (detection_index) contiene 6 valores
+          final detectionRow = batch[detectionIndex];
+          if (detectionRow is List &&
+              detectionRow.length >= modelOutputValuesPerDetection) {
+            detectionValues = List<double>.generate(
+              modelOutputValuesPerDetection,
+              (valueIndex) => _toDouble(detectionRow[valueIndex]),
             );
+          } else {
+            throw ArgumentError('Formato de tensor no soportado');
           }
+        } else {
+          throw ArgumentError(
+            'Formato de tensor no soportado. batch.length=${batch.length}, '
+            'firstList.length=${firstList.length}',
+          );
         }
       } else {
-        // El tensor no tiene la estructura esperada
         throw ArgumentError(
-          'Formato de tensor no soportado. Se espera List<List<dynamic>>, '
-          'pero se recibió: ${firstElement.runtimeType}',
+          'Formato de tensor no soportado. Tipo: ${firstElement.runtimeType}',
         );
       }
 
-      // Extraer coordenadas del bounding box (normalizadas 0-1)
-      final x = detectionValues[bboxXIndex].clamp(0.0, 1.0);
-      final y = detectionValues[bboxYIndex].clamp(0.0, 1.0);
-      final width = detectionValues[bboxWidthIndex].clamp(0.0, 1.0);
-      final height = detectionValues[bboxHeightIndex].clamp(0.0, 1.0);
+      // Extraer coordenadas raw del bounding box
+      var xRaw = detectionValues[bboxXIndex];
+      var yRaw = detectionValues[bboxYIndex];
+      var widthRaw = detectionValues[bboxWidthIndex];
+      var heightRaw = detectionValues[bboxHeightIndex];
 
-      // Extraer objectness (probabilidad de que haya un objeto)
-      final objectness = detectionValues[objectnessIndex].clamp(0.0, 1.0);
+      // Detectar si las coordenadas están en píxeles o normalizadas
+      final maxCoord = [xRaw, yRaw, widthRaw, heightRaw].reduce(math.max);
+      final isPixelCoords = maxCoord > 1.5;
 
-      // Extraer scores de clases (80 clases COCO)
+      double x, y, width, height;
+      if (isPixelCoords) {
+        // Coordenadas en píxeles: normalizar dividiendo por modelInputSize
+        x = (xRaw / modelInputSize).clamp(0.0, 1.0);
+        y = (yRaw / modelInputSize).clamp(0.0, 1.0);
+        width = (widthRaw / modelInputSize).clamp(0.0, 1.0);
+        height = (heightRaw / modelInputSize).clamp(0.0, 1.0);
+      } else {
+        // Ya están normalizadas
+        x = xRaw.clamp(0.0, 1.0);
+        y = yRaw.clamp(0.0, 1.0);
+        width = widthRaw.clamp(0.0, 1.0);
+        height = heightRaw.clamp(0.0, 1.0);
+      }
+
+      // Extraer scores de clases (2 clases: hueco, grieta)
       final classScores = List<double>.generate(
-        numCocoClasses,
+        numClasses,
         (classIndex) {
           final scoreIndex = classScoresStartIndex + classIndex;
           if (scoreIndex < detectionValues.length) {
-            return detectionValues[scoreIndex].clamp(0.0, 1.0);
+            return detectionValues[scoreIndex];
           }
           return 0.0;
         },
       );
 
-      // Calcular confianza: objectness * max(class_scores)
-      final maxClassScore = classScores.reduce((a, b) => a > b ? a : b);
-      final confidence = (objectness * maxClassScore).clamp(0.0, 1.0);
-
-      // Determinar clase detectada (argmax de class_scores)
-      var maxScoreIndex = 0;
-      var maxScore = classScores[0];
-      for (var i = 1; i < classScores.length; i++) {
-        if (classScores[i] > maxScore) {
-          maxScore = classScores[i];
+      // Calcular confianza: max(class_scores)
+      // IMPORTANTE: Aplicar sigmoid SIEMPRE porque el modelo puede producir logits
+      double maxClassScore = 0.0;
+      int maxScoreIndex = 0;
+      for (var i = 0; i < classScores.length; i++) {
+        // Aplicar sigmoid siempre para convertir logits a probabilidades
+        final score = _sigmoid(classScores[i]);
+        if (score > maxClassScore) {
+          maxClassScore = score;
           maxScoreIndex = i;
         }
       }
+      final confidence = maxClassScore.clamp(0.0, 1.0);
 
-      // Mapear clase COCO a clase del proyecto
-      String detectionType;
-      if (cocoClassToProjectClass.containsKey(maxScoreIndex)) {
-        detectionType = cocoClassToProjectClass[maxScoreIndex]!;
-      } else {
-        // Si la clase no está mapeada, usar la primera clase del proyecto por defecto
-        // Esto puede ocurrir si el modelo detecta una clase COCO no relevante
-        detectionType = projectClasses[0];
-      }
+      // Mapear índice de clase a nombre
+      final detectionType = classIndexToName[maxScoreIndex] ?? projectClasses[0];
 
       // Crear bounding box
       final boundingBox = BoundingBoxModel.fromNormalized(
@@ -243,8 +237,6 @@ class DetectionResultModel extends DetectionResult {
         height: height,
       );
 
-      // Crear y retornar el modelo
-      // boundingBox ya es una entidad del domain (BoundingBox), no necesita conversión
       return DetectionResultModel(
         type: detectionType,
         confidence: confidence,
@@ -252,29 +244,60 @@ class DetectionResultModel extends DetectionResult {
         timestamp: timestamp,
       );
     } catch (e) {
-      throw ArgumentError(
-        'Error al procesar salida del modelo TFLite: $e',
-      );
+      throw ArgumentError('Error al procesar salida del modelo TFLite: $e');
     }
   }
 
+  /// Función sigmoid para convertir logits a probabilidades
+  static double _sigmoid(double x) {
+    return 1.0 / (1.0 + math.exp(-x));
+  }
+
+  /// Convierte un valor dinámico a double de forma segura
+  static double _toDouble(dynamic value) {
+    if (value is double) return value;
+    if (value is int) return value.toDouble();
+    if (value is num) return value.toDouble();
+    return 0.0;
+  }
+
+  /// Valida que el tamaño del bounding box esté dentro de límites razonables
+  /// 
+  /// Filtra detecciones con:
+  /// - Área muy pequeña (ruido) o muy grande (falsos positivos)
+  /// - Dimensiones extremas (ancho/alto)
+  /// - Aspect ratio inválido (proporciones no realistas)
+  static bool _isValidBboxSize(BoundingBox bbox) {
+    final width = bbox.width;
+    final height = bbox.height;
+    final area = width * height;
+
+    // Filtrar por dimensiones mínimas
+    if (width < minBboxDimension || height < minBboxDimension) {
+      return false;
+    }
+
+    // Filtrar por dimensiones máximas
+    if (width > maxBboxDimension || height > maxBboxDimension) {
+      return false;
+    }
+
+    // Filtrar por área
+    if (area < minBboxArea || area > maxBboxArea) {
+      return false;
+    }
+
+    // Filtrar por aspect ratio (proporciones)
+    // Los huecos y grietas tienen proporciones razonables
+    final aspectRatio = width / height;
+    if (aspectRatio < minAspectRatio || aspectRatio > maxAspectRatio) {
+      return false;
+    }
+
+    return true;
+  }
+
   /// Crea una lista de DetectionResultModel desde la salida completa del modelo TFLite
-  /// 
-  /// [tfliteOutput] - Tensor de salida del modelo TFLite con forma [1, 84, 8400]
-  /// [timestamp] - Timestamp de cuando se realizó la detección
-  /// [confidenceThreshold] - Umbral mínimo de confianza para filtrar detecciones
-  /// 
-  /// Procesa todas las detecciones en el tensor y retorna solo aquellas
-  /// que superan el umbral de confianza.
-  /// 
-  /// Ejemplo:
-  /// ```dart
-  /// final detections = DetectionResultModel.fromTfliteOutputBatch(
-  ///   tfliteOutput: outputTensor,
-  ///   timestamp: DateTime.now(),
-  ///   confidenceThreshold: 0.5,
-  /// );
-  /// ```
   static List<DetectionResultModel> fromTfliteOutputBatch({
     required List<dynamic> tfliteOutput,
     required DateTime timestamp,
@@ -283,21 +306,40 @@ class DetectionResultModel extends DetectionResult {
     final detections = <DetectionResultModel>[];
 
     try {
-      // Validar estructura del tensor
       if (tfliteOutput.isEmpty) {
         return detections;
       }
 
-      // Obtener el primer batch
-      final batch = tfliteOutput[0] as List<dynamic>;
+      // Desenvolver el tensor hasta llegar a [6, 8400]
+      final batch = _unwrapTensor(tfliteOutput);
+
       if (batch.isEmpty) {
+        // ignore: avoid_print
+        print('Error: batch vacío después de desenvolver tensor');
         return detections;
       }
 
+      // Determinar número de detecciones según la estructura
+      int numDetections = modelOutputNumDetections;
+      final firstElement = batch[0];
+      
+      if (firstElement is List) {
+        if (firstElement.length >= modelOutputNumDetections) {
+          // Forma [6, 8400]
+          numDetections = firstElement.length;
+        } else if (batch.length >= modelOutputNumDetections) {
+          // Forma [8400, 6]
+          numDetections = batch.length;
+        }
+      }
+
+      // Variables para debug
+      double maxScoreFound = 0.0;
+      int detectionsAboveThreshold = 0;
+      int filteredBySize = 0;
+
       // Procesar cada detección
-      for (var detectionIndex = 0;
-          detectionIndex < modelOutputNumDetections;
-          detectionIndex++) {
+      for (var detectionIndex = 0; detectionIndex < numDetections; detectionIndex++) {
         try {
           final detection = DetectionResultModel.fromTfliteOutput(
             tfliteOutput: tfliteOutput,
@@ -305,19 +347,38 @@ class DetectionResultModel extends DetectionResult {
             timestamp: timestamp,
           );
 
+          if (detection.confidence > maxScoreFound) {
+            maxScoreFound = detection.confidence;
+          }
+
           // Filtrar por umbral de confianza
           if (detection.confidence >= confidenceThresholdValue) {
-            detections.add(detection);
+            detectionsAboveThreshold++;
+            
+            // Validar tamaño del bounding box
+            if (_isValidBboxSize(detection.boundingBox)) {
+              detections.add(detection);
+            } else {
+              filteredBySize++;
+            }
           }
         } catch (e) {
-          // Si hay error procesando una detección, continuar con la siguiente
-          // Esto puede ocurrir si el formato del tensor no es exactamente el esperado
+          // Continuar con la siguiente detección
           continue;
         }
       }
+
+      // Log de debug (solo cada 5 frames)
+      if (detections.isNotEmpty || maxScoreFound > 0.3) {
+        // ignore: avoid_print
+        print('Parsing: max=${maxScoreFound.toStringAsFixed(3)}, '
+            'above_thresh=$detectionsAboveThreshold, '
+            'filtered_size=$filteredBySize, '
+            'valid=${detections.length}');
+      }
     } catch (e) {
-      // Si hay error general, retornar lista vacía
-      // El error será manejado en el repositorio
+      // ignore: avoid_print
+      print('Error procesando batch: $e');
       return detections;
     }
 
@@ -325,9 +386,6 @@ class DetectionResultModel extends DetectionResult {
   }
 
   /// Convierte este modelo a la entidad del domain layer
-  /// 
-  /// Retorna una instancia de [DetectionResult] del domain layer.
-  /// Como DetectionResultModel extiende DetectionResult, simplemente retorna this.
   DetectionResult toEntity() {
     return DetectionResult(
       type: type,
@@ -337,4 +395,3 @@ class DetectionResultModel extends DetectionResult {
     );
   }
 }
-

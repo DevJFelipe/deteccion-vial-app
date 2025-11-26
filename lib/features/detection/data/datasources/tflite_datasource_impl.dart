@@ -4,9 +4,11 @@
 /// para cargar modelos TFLite y ejecutar inferencias sobre imágenes.
 library;
 
+import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/services.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
-import 'package:image/image.dart' as img;
 import '../../../../core/error/exceptions.dart';
 import 'tflite_datasource.dart';
 import '../models/detection_constants.dart'
@@ -16,7 +18,7 @@ import '../models/detection_constants.dart'
 /// 
 /// Usa el plugin tflite_flutter para:
 /// - Cargar modelos TFLite desde assets
-/// - Preprocesar imágenes (YUV420 → RGB, redimensionar, normalizar)
+/// - Preprocesar imágenes RGB (redimensionar, normalizar)
 /// - Ejecutar inferencias
 /// - Retornar salida raw del modelo
 class TfliteDatasourceImpl implements TfliteDatasource {
@@ -28,15 +30,36 @@ class TfliteDatasourceImpl implements TfliteDatasource {
 
   /// Tamaño de entrada del modelo (640×640 para YOLOv8)
   static const int _modelInputSize = modelInputSize;
-
-  /// Número de canales de entrada (RGB = 3)
-  static const int _inputChannels = 3;
+  
+  /// Forma del tensor de salida (se determina al cargar el modelo)
+  List<int>? _outputShape;
+  
+  /// Buffer de entrada reutilizable para evitar allocaciones
+  List<List<List<List<double>>>>? _inputBuffer;
 
   @override
   Future<void> loadModel(String modelPath) async {
     try {
-      // Cargar el modelo usando tflite_flutter
-      _interpreter = await Interpreter.fromAsset(modelPath);
+      // Copiar el modelo desde assets al sistema de archivos del dispositivo
+      final modelFile = await _copyAssetToFile(modelPath);
+      
+      // Configurar opciones del intérprete para mejor rendimiento
+      final options = InterpreterOptions()
+        ..threads = 4;  // Usar 4 threads para paralelismo
+      
+      // Intentar usar NNAPI para Android (aceleración de hardware)
+      try {
+        options.useNnApiForAndroid = true;
+        // ignore: avoid_print
+        print('NNAPI habilitado para aceleración de hardware');
+      } catch (e) {
+        // NNAPI no disponible, continuar sin aceleración
+        // ignore: avoid_print
+        print('NNAPI no disponible: $e');
+      }
+      
+      // Cargar el modelo desde el archivo con opciones optimizadas
+      _interpreter = Interpreter.fromFile(modelFile, options: options);
 
       // Validar que el modelo se cargó exitosamente
       if (_interpreter == null) {
@@ -61,6 +84,35 @@ class TfliteDatasourceImpl implements TfliteDatasource {
         );
       }
 
+      // Guardar la forma del tensor de salida
+      _outputShape = outputTensors[0].shape;
+
+      // Pre-allocar buffer de entrada [1, 640, 640, 3]
+      _inputBuffer = List.generate(
+        1,
+        (_) => List.generate(
+          _modelInputSize,
+          (_) => List.generate(
+            _modelInputSize,
+            (_) => List<double>.filled(3, 0.0),
+          ),
+        ),
+      );
+
+      // Log de información del modelo para debug
+      // ignore: avoid_print
+      print('=== MODELO CARGADO ===');
+      // ignore: avoid_print
+      print('Input shape: ${inputTensors[0].shape}');
+      // ignore: avoid_print
+      print('Input type: ${inputTensors[0].type}');
+      // ignore: avoid_print
+      print('Output shape: $_outputShape');
+      // ignore: avoid_print
+      print('Output type: ${outputTensors[0].type}');
+      // ignore: avoid_print
+      print('======================');
+
       // Marcar el modelo como cargado
       _isModelLoaded = true;
     } catch (e) {
@@ -77,6 +129,44 @@ class TfliteDatasourceImpl implements TfliteDatasource {
           'Error al cargar el modelo desde $modelPath: $e',
         );
       }
+    }
+  }
+
+  /// Copia un asset al sistema de archivos del dispositivo
+  Future<File> _copyAssetToFile(String assetPath) async {
+    try {
+      final appDir = await getApplicationDocumentsDirectory();
+      final fileName = assetPath.split('/').last;
+      final filePath = '${appDir.path}/$fileName';
+      final file = File(filePath);
+
+      // Si el archivo ya existe y no está vacío, reutilizarlo
+      if (await file.exists()) {
+        final fileSize = await file.length();
+        if (fileSize > 0) {
+          // ignore: avoid_print
+          print('Modelo ya existe en: $filePath (${fileSize ~/ 1024 ~/ 1024} MB)');
+          return file;
+        }
+      }
+
+      // Cargar el asset desde el bundle
+      // ignore: avoid_print
+      print('Copiando modelo desde assets: $assetPath');
+      final data = await rootBundle.load(assetPath);
+      final bytes = data.buffer.asUint8List();
+
+      // Escribir al archivo
+      await file.writeAsBytes(bytes, flush: true);
+      
+      // ignore: avoid_print
+      print('Modelo copiado a: $filePath (${bytes.length ~/ 1024 ~/ 1024} MB)');
+      
+      return file;
+    } catch (e) {
+      throw ModelInferenceException(
+        'Error al copiar el modelo al sistema de archivos: $e',
+      );
     }
   }
 
@@ -107,11 +197,11 @@ class TfliteDatasourceImpl implements TfliteDatasource {
     }
 
     try {
-      // Preprocesar la imagen
-      final preprocessedImage = _preprocessImage(imageBytes, width, height);
+      // Preprocesar la imagen RGB directamente (optimizado)
+      _preprocessImageRGB(imageBytes, width, height);
 
       // Ejecutar inferencia
-      final output = _runInferenceInternal(preprocessedImage);
+      final output = _runInferenceInternal();
 
       return output;
     } catch (e) {
@@ -125,140 +215,102 @@ class TfliteDatasourceImpl implements TfliteDatasource {
     }
   }
 
-  /// Preprocesa la imagen para la inferencia
+  /// Preprocesa una imagen RGB directamente al buffer de entrada
   /// 
-  /// Procesa la imagen de entrada:
-  /// 1. Convierte YUV420 a RGB (si es necesario)
-  /// 2. Redimensiona a 640×640
-  /// 3. Normaliza valores [0-1]
-  /// 
-  /// Retorna un tensor de entrada preparado para el modelo.
-  Float32List _preprocessImage(
-    Uint8List imageBytes,
-    int width,
-    int height,
+  /// Esta versión optimizada:
+  /// - Trabaja directamente con bytes RGB sin decodificar
+  /// - Pre-calcula índices para evitar cálculos repetidos
+  /// - Usa acceso directo al buffer para mejor rendimiento
+  /// - Reutiliza el buffer de entrada pre-allocado
+  void _preprocessImageRGB(
+    Uint8List rgbBytes,
+    int srcWidth,
+    int srcHeight,
   ) {
-    try {
-      // Intentar decodificar la imagen
-      // Si no se puede decodificar, asumimos que es YUV420 (plano Y)
-      final image = img.decodeImage(imageBytes);
-
-      img.Image processedImage;
-
-      if (image != null) {
-        // La imagen se pudo decodificar, redimensionarla
-        processedImage = img.copyResize(
-          image,
-          width: _modelInputSize,
-          height: _modelInputSize,
-          interpolation: img.Interpolation.linear,
-        );
-      } else {
-        // Asumimos que es YUV420 (plano Y) - crear imagen grayscale
-        processedImage = _createImageFromYPlane(imageBytes, width, height);
-      }
-
-      // Convertir a tensor RGB normalizado [0-1]
-      // Formato esperado: [1, height, width, channels] o [height, width, channels]
-      final inputTensor = Float32List(_modelInputSize * _modelInputSize * _inputChannels);
-      var index = 0;
-
-      for (var y = 0; y < _modelInputSize; y++) {
-        for (var x = 0; x < _modelInputSize; x++) {
-          final pixel = processedImage.getPixel(x, y);
-          
-          // Extraer componentes RGB y normalizar [0-1]
-          final r = pixel.r.toDouble() / pixelNormalizationDivisor;
-          final g = pixel.g.toDouble() / pixelNormalizationDivisor;
-          final b = pixel.b.toDouble() / pixelNormalizationDivisor;
-          
-          // Almacenar en orden RGB
-          inputTensor[index++] = r;
-          inputTensor[index++] = g;
-          inputTensor[index++] = b;
-        }
-      }
-
-      return inputTensor;
-    } catch (e) {
-      throw ModelInferenceException(
-        'Error durante el preprocesamiento de la imagen: $e',
+    if (_inputBuffer == null) {
+      throw const ModelInferenceException(
+        'Buffer de entrada no inicializado',
       );
     }
-  }
 
-  /// Crea una imagen desde el plano Y de YUV420
-  /// 
-  /// Convierte el plano Y (luminancia) a una imagen RGB
-  /// donde R=G=B=Y (grayscale).
-  img.Image _createImageFromYPlane(
-    Uint8List yBytes,
-    int width,
-    int height,
-  ) {
-    try {
-      // Crear imagen grayscale desde el plano Y
-      final image = img.Image(width: width, height: height);
+    // Verificar si los bytes son RGB (3 bytes por pixel)
+    final expectedRGBSize = srcWidth * srcHeight * 3;
+    final isRGB = rgbBytes.length == expectedRGBSize;
+    final bytesLength = rgbBytes.length;
 
-      for (var y = 0; y < height; y++) {
-        for (var x = 0; x < width; x++) {
-          final index = y * width + x;
-          if (index < yBytes.length) {
-            final gray = yBytes[index];
-            image.setPixel(x, y, img.ColorRgb8(gray, gray, gray));
+    // Pre-calcular factores de escala como enteros para mayor velocidad
+    final scaleXFixed = (srcWidth << 16) ~/ _modelInputSize;
+    final scaleYFixed = (srcHeight << 16) ~/ _modelInputSize;
+    
+    // Límites pre-calculados
+    final srcWidthMax = srcWidth - 1;
+    final srcHeightMax = srcHeight - 1;
+
+    // Normalización: [0, 255] -> [0, 1]
+    const normFactor = 1.0 / pixelNormalizationDivisor;
+
+    // Obtener referencia directa al buffer para evitar lookups
+    final buffer = _inputBuffer![0];
+
+    // Procesar cada fila
+    for (var dstY = 0; dstY < _modelInputSize; dstY++) {
+      // Pre-calcular coordenada Y fuente para toda la fila
+      var srcY = (dstY * scaleYFixed) >> 16;
+      if (srcY > srcHeightMax) srcY = srcHeightMax;
+      
+      final rowBuffer = buffer[dstY];
+      final srcRowOffset = srcY * srcWidth;
+
+      for (var dstX = 0; dstX < _modelInputSize; dstX++) {
+        // Coordenada X fuente (nearest neighbor)
+        var srcX = (dstX * scaleXFixed) >> 16;
+        if (srcX > srcWidthMax) srcX = srcWidthMax;
+
+        final pixelBuffer = rowBuffer[dstX];
+        
+        if (isRGB) {
+          // Imagen RGB (formato estándar de Ultralytics/YOLOv8)
+          final srcIndex = (srcRowOffset + srcX) * 3;
+          pixelBuffer[0] = rgbBytes[srcIndex] * normFactor;     // R
+          pixelBuffer[1] = rgbBytes[srcIndex + 1] * normFactor; // G
+          pixelBuffer[2] = rgbBytes[srcIndex + 2] * normFactor; // B
+        } else {
+          // Fallback: asumir grayscale (plano Y)
+          final srcIndex = srcRowOffset + srcX;
+          if (srcIndex < bytesLength) {
+            final gray = rgbBytes[srcIndex] * normFactor;
+            pixelBuffer[0] = gray;
+            pixelBuffer[1] = gray;
+            pixelBuffer[2] = gray;
+          } else {
+            pixelBuffer[0] = 0.0;
+            pixelBuffer[1] = 0.0;
+            pixelBuffer[2] = 0.0;
           }
         }
       }
-
-      // Redimensionar a 640×640
-      return img.copyResize(
-        image,
-        width: _modelInputSize,
-        height: _modelInputSize,
-        interpolation: img.Interpolation.linear,
-      );
-    } catch (e) {
-      throw ModelInferenceException(
-        'Error al crear imagen desde plano Y: $e',
-      );
     }
   }
 
-  /// Ejecuta la inferencia sobre una imagen preprocesada
-  /// 
-  /// Ejecuta el modelo TFLite sobre el tensor de entrada preprocesado
-  /// y retorna la salida raw del modelo.
-  List<dynamic> _runInferenceInternal(Float32List inputTensor) {
+  /// Ejecuta la inferencia usando el buffer de entrada pre-llenado
+  List<dynamic> _runInferenceInternal() {
     try {
-      // Obtener información sobre los tensores de entrada y salida
-      final inputTensors = _interpreter!.getInputTensors();
-      final outputTensors = _interpreter!.getOutputTensors();
-
-      if (inputTensors.isEmpty || outputTensors.isEmpty) {
+      if (_outputShape == null || _inputBuffer == null) {
         throw const ModelInferenceException(
-          'Error: el modelo no tiene tensores de entrada o salida',
+          'Error: buffers no inicializados',
         );
       }
 
-      final outputTensorInfo = outputTensors[0];
-
-      // Crear el buffer de salida basado en la forma del tensor
-      final outputShape = outputTensorInfo.shape;
-      final outputSize = outputShape.reduce((a, b) => a * b);
-      
-      // Crear buffer de salida como lista plana de doubles
-      // tflite_flutter espera un buffer plano para la salida
-      final outputBuffer = List<double>.filled(outputSize, 0.0);
+      // Crear buffer de salida con la forma correcta
+      final outputBuffer = _createOutputBuffer(_outputShape!);
 
       // Ejecutar la inferencia
-      // tflite_flutter espera los tensores como List o typed arrays
-      // El método run(input, output) espera:
-      // - input: Float32List o List<double>
-      // - output: List<double> o List con la forma del tensor
-      _interpreter!.run(inputTensor, outputBuffer);
+      _interpreter!.run(_inputBuffer!, outputBuffer);
 
-      // Convertir la salida a la forma esperada
-      return _reshapeOutput(outputBuffer, outputShape);
+      // Log detallado de salida para debug
+      _logOutputDebug(outputBuffer);
+
+      return [outputBuffer];
     } catch (e) {
       throw ModelInferenceException(
         'Error durante la ejecución de la inferencia: $e',
@@ -266,73 +318,104 @@ class TfliteDatasourceImpl implements TfliteDatasource {
     }
   }
 
-  /// Reformatea la salida del modelo a la forma esperada
-  /// 
-  /// Convierte el buffer plano de salida a la forma del tensor
-  /// especificada por outputShape.
-  List<dynamic> _reshapeOutput(
-    List<double> outputBuffer,
-    List<int> outputShape,
-  ) {
+  /// Log de debug para analizar la salida del modelo
+  void _logOutputDebug(dynamic outputBuffer) {
     try {
-      // Si la salida tiene forma [1, 84, 8400], retornamos List<List<List<double>>>
-      // Si tiene forma [84, 8400], retornamos List<List<double>>
-      
-      if (outputShape.length == 3) {
-        // Forma [batch, height, width]
-        final batchSize = outputShape[0];
-        final height = outputShape[1];
-        final width = outputShape[2];
-        
-        final result = <List<List<double>>>[];
-        var index = 0;
-        
-        for (var b = 0; b < batchSize; b++) {
-          final batch = <List<double>>[];
-          for (var h = 0; h < height; h++) {
-            final row = <double>[];
-            for (var w = 0; w < width; w++) {
-              if (index < outputBuffer.length) {
-                row.add(outputBuffer[index++]);
-              } else {
-                row.add(0.0);
+      // Solo logear cada 5 inferencias para no saturar
+      _inferenceCount++;
+      if (_inferenceCount % 5 != 1) return;
+
+      // ignore: avoid_print
+      print('=== DEBUG OUTPUT (inferencia #$_inferenceCount) ===');
+      // ignore: avoid_print
+      print('Output shape: $_outputShape');
+
+      if (outputBuffer is List && outputBuffer.isNotEmpty) {
+        final batch = outputBuffer[0];
+        if (batch is List && batch.isNotEmpty) {
+          // Forma [6, 8400]: batch[i] = fila i, batch[i][j] = valor de detección j
+          // Buscar la detección con mayor confianza
+          double maxScore = 0.0;
+          int maxIdx = 0;
+          
+          // Los class scores están en las filas 4 y 5 (índices classScoresStartIndex)
+          if (batch.length >= 6) {
+            final class0Scores = batch[4] as List;
+            final class1Scores = batch[5] as List;
+            
+            for (var i = 0; i < class0Scores.length && i < 8400; i++) {
+              final s0 = (class0Scores[i] as num).toDouble();
+              final s1 = (class1Scores[i] as num).toDouble();
+              final maxS = s0 > s1 ? s0 : s1;
+              if (maxS > maxScore) {
+                maxScore = maxS;
+                maxIdx = i;
               }
             }
-            batch.add(row);
-          }
-          result.add(batch);
-        }
-        
-        return result;
-      } else if (outputShape.length == 2) {
-        // Forma [height, width]
-        final height = outputShape[0];
-        final width = outputShape[1];
-        
-        final result = <List<double>>[];
-        var index = 0;
-        
-        for (var h = 0; h < height; h++) {
-          final row = <double>[];
-          for (var w = 0; w < width; w++) {
-            if (index < outputBuffer.length) {
-              row.add(outputBuffer[index++]);
-            } else {
-              row.add(0.0);
+            
+            // Imprimir info de la detección con mayor score
+            if (maxScore > 0) {
+              final x = (batch[0] as List)[maxIdx];
+              final y = (batch[1] as List)[maxIdx];
+              final w = (batch[2] as List)[maxIdx];
+              final h = (batch[3] as List)[maxIdx];
+              final c0 = class0Scores[maxIdx];
+              final c1 = class1Scores[maxIdx];
+              
+              // ignore: avoid_print
+              print('Best detection #$maxIdx: '
+                  'bbox=($x, $y, $w, $h), '
+                  'scores=(hueco: $c0, grieta: $c1), '
+                  'max=$maxScore');
             }
           }
-          result.add(row);
+          
+          // ignore: avoid_print
+          print('Max confidence found: ${maxScore.toStringAsFixed(4)}');
         }
-        
-        return result;
-      } else {
-        // Forma 1D o desconocida, retornar como está
-        return outputBuffer;
       }
+      // ignore: avoid_print
+      print('======================');
     } catch (e) {
-      throw ModelInferenceException(
-        'Error al reformatear la salida del modelo: $e',
+      // ignore: avoid_print
+      print('Error en debug log: $e');
+    }
+  }
+
+  int _inferenceCount = 0;
+
+  /// Crea un buffer de salida con la forma correcta
+  dynamic _createOutputBuffer(List<int> shape) {
+    if (shape.length == 3) {
+      // Forma [batch, values, detections] ej: [1, 6, 8400]
+      return List.generate(
+        shape[0],
+        (_) => List.generate(
+          shape[1],
+          (_) => List<double>.filled(shape[2], 0.0),
+        ),
       );
+    } else if (shape.length == 2) {
+      // Forma [values, detections]
+      return List.generate(
+        shape[0],
+        (_) => List<double>.filled(shape[1], 0.0),
+      );
+    } else if (shape.length == 4) {
+      // Forma [batch, height, width, channels]
+      return List.generate(
+        shape[0],
+        (_) => List.generate(
+          shape[1],
+          (_) => List.generate(
+            shape[2],
+            (_) => List<double>.filled(shape[3], 0.0),
+          ),
+        ),
+      );
+    } else {
+      // Forma 1D
+      return List<double>.filled(shape.reduce((a, b) => a * b), 0.0);
     }
   }
 
@@ -348,6 +431,7 @@ class TfliteDatasourceImpl implements TfliteDatasource {
       _interpreter?.close();
       _interpreter = null;
       _isModelLoaded = false;
+      _inputBuffer = null;
     } catch (e) {
       throw ModelInferenceException(
         'Error al liberar recursos del modelo: $e',
@@ -355,4 +439,3 @@ class TfliteDatasourceImpl implements TfliteDatasource {
     }
   }
 }
-

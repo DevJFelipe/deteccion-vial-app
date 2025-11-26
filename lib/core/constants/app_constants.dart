@@ -4,8 +4,8 @@
 /// para el modelo de detección, cámara, GPS, base de datos y rendimiento.
 library;
 
-/// Ruta del modelo TensorFlow Lite cuantizado
-const String modelPath = 'assets/models/yolov8s_int8.tflite';
+/// Ruta del modelo TensorFlow Lite (int8 cuantizado para mejor rendimiento)
+const String modelPath = 'assets/models/bestv8s_int8.tflite';
 
 /// Tamaño de entrada del modelo YOLOv8s (640x640 píxeles)
 const int inputSize = 640;

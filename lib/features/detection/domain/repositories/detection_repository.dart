@@ -25,13 +25,15 @@ abstract class DetectionRepository {
   /// 
   /// Ejemplo:
   /// ```dart
-  /// await repository.loadModel('assets/models/yolov8n_int8.tflite');
+  /// await repository.loadModel('models/yolov8s_int8.tflite');
   /// ```
   Future<void> loadModel(String modelPath);
 
   /// Ejecuta una inferencia sobre una imagen
   /// 
-  /// [imageBytes] - Bytes de la imagen a procesar
+  /// [imageBytes] - Bytes de la imagen a procesar (formato YUV420 plano Y o RGB)
+  /// [width] - Ancho de la imagen en píxeles (opcional, se estima si no se proporciona)
+  /// [height] - Alto de la imagen en píxeles (opcional, se estima si no se proporciona)
   /// 
   /// Retorna una lista de [DetectionResult] con todas las detecciones
   /// encontradas en la imagen que superen el umbral de confianza.
@@ -43,11 +45,14 @@ abstract class DetectionRepository {
   /// 
   /// Ejemplo:
   /// ```dart
-  /// final results = await repository.runInference(imageBytes);
+  /// final results = await repository.runInference(imageBytes, 640, 480);
   /// for (final result in results) {
   ///   print('Detectado: ${result.type} con confianza ${result.confidence}');
   /// }
   /// ```
-  Future<List<DetectionResult>> runInference(Uint8List imageBytes);
+  Future<List<DetectionResult>> runInference(
+    Uint8List imageBytes, {
+    int? width,
+    int? height,
+  });
 }
-

@@ -65,12 +65,13 @@ class CameraDataSourceImpl implements CameraDataSource {
         orElse: () => cameras.first,
       );
 
-      // Crear controlador de cámara con configuración optimizada
-      // ResolutionPreset.medium = 640×480 (mínimo requerido)
+      // Crear controlador de cámara con configuración optimizada para rendimiento
+      // ResolutionPreset.low = 320×240 (optimizado para inferencia rápida)
+      // La inferencia redimensiona a 640x640, resolución baja es suficiente
       // ImageFormatGroup.yuv420 = formato nativo para streams (crítico)
       _controller = camera_package.CameraController(
         backCamera,
-        camera_package.ResolutionPreset.medium,
+        camera_package.ResolutionPreset.low,
         imageFormatGroup: camera_package.ImageFormatGroup.yuv420,
         enableAudio: false, // No necesitamos audio para detección vial
       );

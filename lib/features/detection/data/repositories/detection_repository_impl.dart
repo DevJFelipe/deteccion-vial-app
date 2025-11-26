@@ -13,8 +13,8 @@ import '../../../../core/error/exceptions.dart';
 import '../datasources/tflite_datasource.dart';
 import '../models/detection_result_model.dart';
 import '../models/detection_constants.dart'
-    show confidenceThreshold, nmsThreshold;
-import '../utils/nms_utils.dart' show applyNMS;
+    show confidenceThreshold, nmsPerClassThreshold, maxDetectionsPerFrame;
+import '../utils/nms_utils.dart' show applyNMSPerClass;
 
 /// Implementación concreta de [DetectionRepository]
 /// 
@@ -36,12 +36,6 @@ class DetectionRepositoryImpl implements DetectionRepository {
   /// Constructor del repositorio
   /// 
   /// [datasource] - DataSource TFLite a utilizar (inyección de dependencias)
-  /// 
-  /// Ejemplo:
-  /// ```dart
-  /// final datasource = TfliteDatasourceImpl();
-  /// final repository = DetectionRepositoryImpl(datasource);
-  /// ```
   const DetectionRepositoryImpl(this.datasource);
 
   @override
@@ -49,15 +43,12 @@ class DetectionRepositoryImpl implements DetectionRepository {
     try {
       await datasource.loadModel(modelPath);
     } on ModelInferenceException {
-      // Re-lanzar ModelInferenceException sin modificar
       rethrow;
     } on Exception catch (e) {
-      // Transformar excepciones genéricas a ModelInferenceException
       throw ModelInferenceException(
         'Error al cargar el modelo: ${e.toString()}',
       );
     } catch (e) {
-      // Capturar cualquier otro error
       throw ModelInferenceException(
         'Error inesperado al cargar el modelo: ${e.toString()}',
       );
@@ -65,46 +56,39 @@ class DetectionRepositoryImpl implements DetectionRepository {
   }
 
   @override
-  Future<List<DetectionResult>> runInference(Uint8List imageBytes) async {
+  Future<List<DetectionResult>> runInference(
+    Uint8List imageBytes, {
+    int? width,
+    int? height,
+  }) async {
     // Validar que el modelo está cargado
     if (!datasource.isModelLoaded) {
       throw const ModelInferenceException('Modelo no cargado');
     }
 
     try {
-      // 1. Preprocesamiento e inferencia
-      // El datasource se encarga de preprocesar la imagen y ejecutar la inferencia
-      // Necesitamos pasar las dimensiones de la imagen
-      // Asumimos que imageBytes contiene una imagen de tamaño conocido
-      // Para frames de cámara, típicamente son 640×480 o 1280×720
-      
       // Obtener dimensiones de la imagen
-      // Si imageBytes viene del CameraFrame, necesitamos las dimensiones
-      // Por ahora, asumimos que es necesario pasar las dimensiones
-      // Esto debería venir del CameraFrame entity
+      // Si no se proporcionan, estimarlas desde el tamaño de bytes
+      int imageWidth;
+      int imageHeight;
       
-      // Ejecutar inferencia
-      // Nota: El datasource espera (imageBytes, width, height)
-      // Para frames de cámara, necesitamos las dimensiones reales
-      // Por ahora, asumimos que imageBytes viene con dimensiones conocidas
-      // o que necesitamos estimarlas desde el tamaño de los bytes
-      
-      // Estimación de dimensiones desde el tamaño de bytes
-      // Si es YUV420 plano Y: size = width * height
-      // Si es RGB: size = width * height * 3
-      // Para simplificar, asumimos que es plano Y y estimamos dimensiones
-      final estimatedSize = _estimateImageSize(imageBytes);
-      final width = estimatedSize['width']!;
-      final height = estimatedSize['height']!;
+      if (width != null && height != null) {
+        imageWidth = width;
+        imageHeight = height;
+      } else {
+        final estimatedSize = _estimateImageSize(imageBytes);
+        imageWidth = estimatedSize['width']!;
+        imageHeight = estimatedSize['height']!;
+      }
       
       // Ejecutar inferencia via datasource
       final tfliteOutput = await datasource.runInference(
         imageBytes,
-        width,
-        height,
+        imageWidth,
+        imageHeight,
       );
 
-      // 2. Post-procesamiento: parsear tensor de salida
+      // Post-procesamiento: parsear tensor de salida
       final timestamp = DateTime.now();
       final allDetections = DetectionResultModel.fromTfliteOutputBatch(
         tfliteOutput: tfliteOutput,
@@ -112,31 +96,26 @@ class DetectionRepositoryImpl implements DetectionRepository {
         confidenceThresholdValue: confidenceThreshold,
       );
 
-      // 3. Aplicar NMS para filtrar detecciones superpuestas
-      final filteredDetections = applyNMS(
+      // Aplicar NMS por clase para mejor filtrado
+      // Esto agrupa por clase, aplica NMS más estricto, y limita detecciones
+      final filteredDetections = applyNMSPerClass(
         allDetections,
-        iouThreshold: nmsThreshold,
+        iouThreshold: nmsPerClassThreshold,
+        maxDetections: maxDetectionsPerFrame,
       );
 
-      // 4. Convertir a entidades del dominio
-      // DetectionResultModel extiende DetectionResult, así que ya son entidades
-      // Solo necesitamos retornarlas directamente
       return filteredDetections;
     } on ModelInferenceException {
-      // Re-lanzar ModelInferenceException sin modificar
       rethrow;
     } on ArgumentError catch (e) {
-      // Transformar ArgumentError a ModelInferenceException
       throw ModelInferenceException(
         'Error en post-procesamiento: ${e.toString()}',
       );
     } on Exception catch (e) {
-      // Transformar excepciones genéricas a ModelInferenceException
       throw ModelInferenceException(
         'Error durante la inferencia: ${e.toString()}',
       );
     } catch (e) {
-      // Capturar cualquier otro error
       throw ModelInferenceException(
         'Error inesperado durante la inferencia: ${e.toString()}',
       );
@@ -145,12 +124,7 @@ class DetectionRepositoryImpl implements DetectionRepository {
 
   /// Estima las dimensiones de la imagen desde el tamaño de bytes
   /// 
-  /// [imageBytes] - Bytes de la imagen
-  /// 
-  /// Retorna un mapa con 'width' y 'height' estimados.
-  /// 
   /// Para frames de cámara YUV420 (plano Y), el tamaño es width * height.
-  /// Asumimos dimensiones comunes de cámara (640×480, 1280×720, etc.).
   Map<String, int> _estimateImageSize(Uint8List imageBytes) {
     final size = imageBytes.length;
     
@@ -169,10 +143,9 @@ class DetectionRepositoryImpl implements DetectionRepository {
       }
     }
     
-    // Si no coincide exactamente, asumir 640×480 por defecto
-    // o calcular desde el tamaño de bytes (raíz cuadrada aproximada)
+    // Calcular desde el tamaño de bytes
     if (size > 0) {
-      final estimatedSize = (size * 0.75).round(); // Aproximación para Y plane
+      final estimatedSize = (size * 0.75).round();
       final estimatedDimension = math.sqrt(estimatedSize).round();
       return {
         'width': estimatedDimension,
@@ -188,4 +161,3 @@ class DetectionRepositoryImpl implements DetectionRepository {
     };
   }
 }
-
